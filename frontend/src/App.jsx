@@ -155,18 +155,23 @@ export default function App() {
         }
     }
 
+    const [sidebarOpen, setSidebarOpen] = useState(true)
+
     return (
         <div className="app-container">
             {/* ── Sidebar ──────────────────────────────────── */}
-            <aside className="sidebar">
+            <aside className={`sidebar ${sidebarOpen ? '' : 'collapsed'}`}>
                 <div className="sidebar-header">
-                    <div className="sidebar-logo">
+                    <div className="sidebar-logo" onClick={startNewChat} style={{ cursor: 'pointer' }}>
                         <div className="sidebar-logo-icon">C</div>
                         <div>
                             <h1>ClearPath</h1>
                             <span>AI Assistant</span>
                         </div>
                     </div>
+                    <button className="sidebar-toggle" onClick={() => setSidebarOpen(false)} title="Close sidebar">
+                        ✕
+                    </button>
                 </div>
 
                 <button className="new-chat-btn" onClick={startNewChat}>
@@ -194,6 +199,11 @@ export default function App() {
             <main className="main-content">
                 <header className="chat-header">
                     <div className="chat-header-title">
+                        {!sidebarOpen && (
+                            <button className="sidebar-open-btn" onClick={() => setSidebarOpen(true)} title="Open sidebar">
+                                ☰
+                            </button>
+                        )}
                         <div className="status-dot" />
                         <h2>ClearPath Assistant</h2>
                     </div>
