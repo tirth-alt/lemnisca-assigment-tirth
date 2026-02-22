@@ -8,10 +8,13 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional
 import json
+import os
+from pathlib import Path
 
 from app.config import INDEX_DIR
 from app.pdf_parser import parse_all_pdfs
@@ -79,6 +82,25 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── Static File Serving (Monolith) ────────────────────────────────────
+STATIC_DIR = Path(__file__).parent.parent / "static"
+
+if STATIC_DIR.exists():
+    # Mount /assets for Vite's JS/CSS
+    assets_dir = STATIC_DIR / "assets"
+    if assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+    
+    # Catch-all route to serve index.html for SPA routing
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        index_path = STATIC_DIR / "index.html"
+        if index_path.exists():
+            return FileResponse(index_path)
+        raise HTTPException(status_code=404, detail="Frontend build not found")
+else:
+    logger.warning("Static directory not found at %s. Frontend will not be served.", STATIC_DIR)
 
 
 # ── Pydantic Models ──────────────────────────────────────────────────

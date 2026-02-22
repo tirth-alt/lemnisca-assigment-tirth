@@ -6,7 +6,7 @@ load_dotenv()
 
 # ── Paths ──────────────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).resolve().parent.parent
-PROJECT_ROOT = BASE_DIR.parent
+PROJECT_ROOT = Path(os.getenv("PROJECT_ROOT", BASE_DIR.parent))
 DOCS_DIR = PROJECT_ROOT / "clearpath_docs"
 INDEX_DIR = BASE_DIR / "data"
 FAISS_INDEX_PATH = INDEX_DIR / "faiss_index.bin"

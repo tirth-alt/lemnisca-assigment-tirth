@@ -1,139 +1,108 @@
-# ClearPath RAG Chatbot
+# 🚀 ClearPath AI Assistant: Professional RAG Implementation
 
-A full-stack RAG-powered customer support chatbot for **ClearPath** — a project management SaaS platform.
+[![Live Demo](https://img.shields.io/badge/Live-Demo-brightgreen?style=for-the-badge)](https://clearpath-assistant-590138312966.us-central1.run.app)
+[![Tech Stack](https://img.shields.io/badge/Stack-FastAPI_|_React_|_Groq_|_FAISS-blue?style=for-the-badge)](#tech-stack)
 
-## Architecture
+A robust, enterprise-grade RAG (Retrieval-Augmented Generation) chatbot designed for **ClearPath**, a project management SaaS. This system provides instant, faithful answers based on 30+ internal product documents, technical guides, and business protocols.
 
+---
+
+## 🌟 Key Features
+
+### 1. **High-Performance Streaming UI**
+- **Token-by-Token Streaming**: Leveraging SSE (Server-Sent Events) for real-time response generation.
+- **Queue-Buffered Typewriter Effect**: Implemented a token drainage system to ensure a smooth, fluid reading experience without "jitter" from uneven network packets.
+- **Premium Aesthetics**: Glassmorphism UI, responsive sidebar, and interactive markdown rendering.
+
+### 2. **Deterministic Query Routing (Cost & Latency Optimized)**
+Instead of using an expensive LLM call to classify queries, I implemented an **Additive Signal Classifier**:
+- **Scoring Engine**: Analyzes word count, linguistic complexity (sub-clauses, negations), and specific intent keywords (comparison, explanation).
+- **Dynamic Model Selection**: 
+  - `score < 3`: Routed to **Llama 3.1 8B** (Instant, cost-efficient).
+  - `score >= 3`: Routed to **Llama 3.3 70B** (Complex reasoning, multi-step logic).
+- **Post-Retrieval Upgrade**: Automatically upgrades "simple" queries to the 70B model if retrieval spans multiple conflicting documents.
+
+### 3. **Faithfulness & Grounding Evaluator**
+To prevent hallucinations (the key challenge in RAG), every response undergoes an automated audit:
+- **Grounding Score**: Calculates cosine similarity between the generated answer and the source context.
+- **Refusal Detection**: Automatically flags responses where the LLM admits it doesn't know the answer.
+- **Faithfulness Flags**: Alerts the user (or system admin) if the response has low semantic grounding in the provided documents.
+
+### 4. **Professional RAG Pipeline**
+- **Hierarchical Chunking**: Respects document structure and maintains context with sentence-level overlap.
+- **Vector Search**: FAISS index with L2-normalized inner product for exact cosine similarity matching.
+- **Context Re-ranking**: Prioritizes source documents based on dense vector relevance scores.
+
+---
+
+## 🏗 Architecture
+
+```mermaid
+graph TD
+    User([User Query]) --> Router{Deterministic Router}
+    Router -- Simple --> L1[Llama 3.1 8B]
+    Router -- Complex --> L2[Llama 3.3 70B]
+    User --> Retriever[FAISS Retriever]
+    Retriever --> Context[(30+ PDF Source Docs)]
+    Context --> L1
+    Context --> L2
+    L1 --> Evaluator[Output Evaluator]
+    L2 --> Evaluator
+    Evaluator --> UI([Streaming SSE Response])
 ```
-User Query → Deterministic Router → Retriever (FAISS) → LLM (Groq) → Evaluator → Response
-```
 
-| Component | Tech |
-|---|---|
-| Backend | Python 3.11, FastAPI |
-| PDF Parsing | pdfplumber |
-| Embeddings | multi-qa-MiniLM-L6-cos-v1 (384-dim) |
-| Vector Store | FAISS (local) |
-| LLM | Groq — llama-3.1-8b-instant / llama-3.3-70b-versatile |
-| Frontend | React, Vite, react-markdown |
+---
 
-## Quick Start
+## 🛠 Tech Stack
 
-### 1. Backend
+| Layer | Technology | Rationale |
+|---|---|---|
+| **Frontend** | React 19, Vite, Tailwind-like CSS | Modern, fast, and highly responsive. |
+| **Backend** | FastAPI (Python 3.10) | Asynchronous performance and native support for SSE. |
+| **LLM Inference** | Groq Cloud | Hardware-accelerated inference for sub-second latency. |
+| **Vector DB** | FAISS | Industry-standard for fast local vector search. |
+| **Embeddings** | Sentence-Transformers | `multi-qa-MiniLM-L6-cos-v1` optimized for Q&A tasks. |
+| **Deployment** | Google Cloud Run | Serverless, scalable monolith containerization. |
 
+---
+
+## 🚀 Rapid Deployment
+
+### 1. Local Environment
 ```bash
+# Clone and enter
+git clone <repo-url>
+cd lemnisca_takeHomeAssignment
+
+# Backend Setup
 cd backend
-
-# Create .env with your Groq API key
-echo "GROQ_API_KEY=your_key_here" > .env
-
-# Create venv and install deps
-python3.11 -m venv venv
-source venv/bin/activate
+python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
+touch .env # Add GROQ_API_KEY=your_key
 
-# Start the server (first run will index all PDFs)
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+# Run
+uvicorn app.main:app --port 8080
 ```
 
-### 2. Frontend
-
+### 2. Docker & GCP Cloud Run
+The project is containerized as a **monolith** for simple deployment.
 ```bash
-cd frontend
-npm install
-npm run dev
+# Build & Push
+gcloud builds submit --tag us-central1-docker.pkg.dev/[PROJECT]/monolith-repo/clearpath-monolith
+
+# Deploy
+gcloud run deploy clearpath-assistant --image us-central1-docker.pkg.dev/[PROJECT]/monolith-repo/clearpath-monolith --memory 2Gi
 ```
 
-Open **http://localhost:5173** in your browser.
+---
 
-## Environment Variables
+## 📊 Technical Notes & Trade-offs
 
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `GROQ_API_KEY` | ✅ | — | Your Groq API key |
-| `PORT` | ❌ | 8000 | Backend port |
+- **Why Monolith?**: For this assignment, a unified Docker image (Backend + Static Frontend) prevents CORS issues and reduces deployment overhead on Cloud Run.
+- **Cold Boot Optimization**: Embedding models are **pre-downloaded** during the Docker build phase to prevent runtime latency and Hugging Face rate-limiting.
+- **Token Tracking**: Full billing/usage transparency is returned in the `done` event of the stream, including model latency and token breakdown.
 
-## API Endpoint
+---
 
-### POST `/query`
-
-**Request:**
-```json
-{
-  "question": "What is the price of the Pro plan?",
-  "conversation_id": "optional-id"
-}
-```
-
-**Response:**
-```json
-{
-  "answer": "...",
-  "metadata": {
-    "model_used": "llama-3.3-70b-versatile",
-    "classification": "complex",
-    "tokens": { "input": 1234, "output": 156 },
-    "latency_ms": 847,
-    "chunks_retrieved": 5,
-    "evaluator_flags": []
-  },
-  "sources": [
-    { "document": "14_Pricing_Sheet_2024.pdf", "page": 1, "relevance_score": 0.92 }
-  ],
-  "conversation_id": "conv_abc123"
-}
-```
-
-## Router Logic
-
-Deterministic, additive-signal scoring (no LLM calls):
-
-| Signal | Points |
-|---|---|
-| Word count ≥ 15 | +2 |
-| Complex keywords (compare, explain, why, how does…) | +2 |
-| Multiple question marks | +1 |
-| Comparison words (vs, better, or…) | +1 |
-| Negation in question | +1 |
-| Sub-clause indicators (;, however, but…) | +1 |
-| Multiple entities (and, both, all…) | +1 |
-
-**Threshold:** score ≥ 3 → **complex** → `llama-3.3-70b-versatile`  
-**Post-retrieval override:** simple + chunks from ≥ 3 docs → upgraded to complex
-
-## Evaluator Flags
-
-| Flag | Trigger |
-|---|---|
-| `no_context` | LLM answered but 0 chunks retrieved |
-| `refusal` | LLM explicitly refused/said "I don't know" |
-| `low_grounding` | Cosine similarity between response and context < 0.35 (hallucination) |
-
-## Project Structure
-
-```
-├── backend/
-│   ├── app/
-│   │   ├── main.py          # FastAPI app + /query endpoint
-│   │   ├── config.py        # Central configuration
-│   │   ├── pdf_parser.py    # PDF text extraction
-│   │   ├── chunker.py       # Hierarchical chunking
-│   │   ├── embeddings.py    # Sentence-transformer + FAISS
-│   │   ├── retriever.py     # Top-K vector search
-│   │   ├── router.py        # Deterministic query classifier
-│   │   ├── llm_client.py    # Groq API wrapper
-│   │   ├── prompts.py       # System prompt template
-│   │   ├── evaluator.py     # Output quality checks
-│   │   └── conversation.py  # Multi-turn memory
-│   ├── requirements.txt
-│   └── .env.example
-├── frontend/
-│   ├── src/
-│   │   ├── App.jsx          # Chat UI
-│   │   ├── index.css        # Premium dark theme
-│   │   └── main.jsx         # Entry point
-│   ├── index.html
-│   ├── vite.config.js
-│   └── package.json
-└── clearpath_docs/           # 30 PDF documents
-```
+**Developed by Tirth**  
+*Submitted as the technical assignment for the AI Engineering Internship.*
