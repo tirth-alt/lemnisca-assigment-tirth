@@ -1,0 +1,210 @@
+"""
+ClearPath Chatbot — FastAPI Application
+"""
+
+import time
+import logging
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+from typing import Optional
+
+from app.config import INDEX_DIR
+from app.pdf_parser import parse_all_pdfs
+from app.chunker import chunk_blocks
+from app.embeddings import build_index, load_index, index_exists
+from app.retriever import retrieve
+from app.router import classify_query, maybe_upgrade_after_retrieval
+from app.llm_client import generate
+from app.prompts import build_prompt
+from app.evaluator import evaluate
+from app.conversation import get_or_create_id, add_message, get_history
+
+# ── Logging ───────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s │ %(name)-20s │ %(levelname)-7s │ %(message)s",
+)
+logger = logging.getLogger("clearpath")
+
+# ── Global state (populated on startup) ───────────────────────────────
+faiss_index = None
+chunks_store: list[dict] = []
+
+
+# ── Startup / Shutdown ────────────────────────────────────────────────
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Build or load the FAISS index on startup."""
+    global faiss_index, chunks_store
+
+    if index_exists():
+        logger.info("Loading existing index from disk...")
+        faiss_index, chunks_store = load_index()
+    else:
+        logger.info("No existing index found — building from PDFs...")
+        INDEX_DIR.mkdir(parents=True, exist_ok=True)
+        raw_blocks = parse_all_pdfs()
+        if not raw_blocks:
+            logger.error("No content extracted from PDFs!")
+        else:
+            chunks_store = chunk_blocks(raw_blocks)
+            faiss_index = build_index(chunks_store)
+            logger.info("Index ready: %d chunks indexed", len(chunks_store))
+
+    yield  # App runs here
+
+    logger.info("Shutting down ClearPath Chatbot.")
+
+
+# ── App ───────────────────────────────────────────────────────────────
+app = FastAPI(
+    title="ClearPath Chatbot API",
+    description="RAG-powered customer support chatbot for ClearPath SaaS",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ── Pydantic Models ──────────────────────────────────────────────────
+class QueryRequest(BaseModel):
+    question: str = Field(..., min_length=1, description="The user's query")
+    conversation_id: Optional[str] = Field(
+        None, description="Optional conversation ID for multi-turn"
+    )
+
+
+class TokenUsage(BaseModel):
+    input: int
+    output: int
+
+
+class Metadata(BaseModel):
+    model_used: str
+    classification: str
+    tokens: TokenUsage
+    latency_ms: int
+    chunks_retrieved: int
+    evaluator_flags: list[str]
+
+
+class Source(BaseModel):
+    document: str
+    page: int
+    relevance_score: float
+
+
+class QueryResponse(BaseModel):
+    answer: str
+    metadata: Metadata
+    sources: list[Source]
+    conversation_id: str
+
+
+# ── Endpoint ──────────────────────────────────────────────────────────
+@app.post("/query", response_model=QueryResponse)
+async def query_endpoint(request: QueryRequest):
+    """Main RAG query endpoint."""
+    start_time = time.time()
+
+    try:
+        # 0. Conversation ID
+        conv_id = get_or_create_id(request.conversation_id)
+
+        # 1. Retrieve relevant chunks
+        if faiss_index is None or not chunks_store:
+            retrieved = []
+        else:
+            retrieved = retrieve(request.question, faiss_index, chunks_store)
+
+        # 2. Initial routing classification
+        route_result = classify_query(request.question)
+
+        # 3. Post-retrieval upgrade check
+        route_result = maybe_upgrade_after_retrieval(route_result, retrieved)
+
+        # 4. Build the system prompt
+        history = get_history(conv_id)
+        system_prompt = build_prompt(retrieved, history)
+
+        # 5. Generate LLM response
+        llm_result = generate(
+            model=route_result["model"],
+            system_prompt=system_prompt,
+            user_message=request.question,
+        )
+
+        # 6. Run evaluator
+        evaluator_flags = evaluate(
+            answer=llm_result["answer"],
+            retrieved_chunks=retrieved,
+            chunks_retrieved_count=len(retrieved),
+        )
+
+        # 7. Update conversation memory
+        add_message(conv_id, "user", request.question)
+        add_message(conv_id, "assistant", llm_result["answer"])
+
+        # 8. Build sources list
+        sources = []
+        seen = set()
+        for item in retrieved:
+            chunk = item["chunk"]
+            doc = chunk["source_file"]
+            page = chunk["page_number"]
+            key = (doc, page)
+            if key not in seen:
+                seen.add(key)
+                sources.append(Source(
+                    document=doc,
+                    page=page,
+                    relevance_score=round(item["score"], 4),
+                ))
+
+        latency_ms = int((time.time() - start_time) * 1000)
+
+        return QueryResponse(
+            answer=llm_result["answer"],
+            metadata=Metadata(
+                model_used=route_result["model"],
+                classification=route_result["classification"],
+                tokens=TokenUsage(
+                    input=llm_result["input_tokens"],
+                    output=llm_result["output_tokens"],
+                ),
+                latency_ms=latency_ms,
+                chunks_retrieved=len(retrieved),
+                evaluator_flags=evaluator_flags,
+            ),
+            sources=sources,
+            conversation_id=conv_id,
+        )
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("Query failed: %s", e, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal server error: {str(e)}",
+        )
+
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint."""
+    return {
+        "status": "healthy",
+        "index_loaded": faiss_index is not None,
+        "chunks_count": len(chunks_store),
+    }
