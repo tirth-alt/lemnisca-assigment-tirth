@@ -8,6 +8,7 @@ export default defineConfig({
         proxy: {
             '/query': 'http://localhost:8000',
             '/health': 'http://localhost:8000',
+            '/conversations': 'http://localhost:8000',
         }
     }
 })

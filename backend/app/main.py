@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional
 
 from app.config import INDEX_DIR
@@ -20,7 +20,10 @@ from app.router import classify_query, maybe_upgrade_after_retrieval
 from app.llm_client import generate
 from app.prompts import build_prompt
 from app.evaluator import evaluate
-from app.conversation import get_or_create_id, add_message, get_history
+from app.conversation import (
+    get_or_create_id, add_message, get_messages_for_llm,
+    get_all_messages, list_conversations,
+)
 
 # ── Logging ───────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -90,6 +93,8 @@ class TokenUsage(BaseModel):
 
 
 class Metadata(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     model_used: str
     classification: str
     tokens: TokenUsage
@@ -111,10 +116,10 @@ class QueryResponse(BaseModel):
     conversation_id: str
 
 
-# ── Endpoint ──────────────────────────────────────────────────────────
+# ── Main Query Endpoint ──────────────────────────────────────────────
 @app.post("/query", response_model=QueryResponse)
 async def query_endpoint(request: QueryRequest):
-    """Main RAG query endpoint."""
+    """Main RAG query endpoint with multi-turn conversation support."""
     start_time = time.time()
 
     try:
@@ -133,30 +138,30 @@ async def query_endpoint(request: QueryRequest):
         # 3. Post-retrieval upgrade check
         route_result = maybe_upgrade_after_retrieval(route_result, retrieved)
 
-        # 4. Build the system prompt
-        history = get_history(conv_id)
-        system_prompt = build_prompt(retrieved, history)
+        # 4. Build the system prompt (context only, no history)
+        system_prompt = build_prompt(retrieved)
 
-        # 5. Generate LLM response
+        # 5. Get conversation history for multi-turn
+        conversation_history = get_messages_for_llm(conv_id)
+
+        # 6. Generate LLM response with multi-turn context
         llm_result = generate(
             model=route_result["model"],
             system_prompt=system_prompt,
             user_message=request.question,
+            conversation_history=conversation_history,
         )
 
-        # 6. Run evaluator
+        # 7. Run evaluator
         evaluator_flags = evaluate(
             answer=llm_result["answer"],
             retrieved_chunks=retrieved,
             chunks_retrieved_count=len(retrieved),
         )
 
-        # 7. Update conversation memory
-        add_message(conv_id, "user", request.question)
-        add_message(conv_id, "assistant", llm_result["answer"])
-
         # 8. Build sources list
         sources = []
+        sources_dicts = []  # for storage
         seen = set()
         for item in retrieved:
             chunk = item["chunk"]
@@ -170,22 +175,37 @@ async def query_endpoint(request: QueryRequest):
                     page=page,
                     relevance_score=round(item["score"], 4),
                 ))
+                sources_dicts.append({
+                    "document": doc,
+                    "page": page,
+                    "relevance_score": round(item["score"], 4),
+                })
 
         latency_ms = int((time.time() - start_time) * 1000)
 
+        metadata_dict = {
+            "model_used": route_result["model"],
+            "classification": route_result["classification"],
+            "tokens": {
+                "input": llm_result["input_tokens"],
+                "output": llm_result["output_tokens"],
+            },
+            "latency_ms": latency_ms,
+            "chunks_retrieved": len(retrieved),
+            "evaluator_flags": evaluator_flags,
+        }
+
+        # 9. Update conversation memory (store with sources/metadata)
+        add_message(conv_id, "user", request.question)
+        add_message(
+            conv_id, "assistant", llm_result["answer"],
+            sources=sources_dicts,
+            metadata=metadata_dict,
+        )
+
         return QueryResponse(
             answer=llm_result["answer"],
-            metadata=Metadata(
-                model_used=route_result["model"],
-                classification=route_result["classification"],
-                tokens=TokenUsage(
-                    input=llm_result["input_tokens"],
-                    output=llm_result["output_tokens"],
-                ),
-                latency_ms=latency_ms,
-                chunks_retrieved=len(retrieved),
-                evaluator_flags=evaluator_flags,
-            ),
+            metadata=Metadata(**metadata_dict),
             sources=sources,
             conversation_id=conv_id,
         )
@@ -200,6 +220,23 @@ async def query_endpoint(request: QueryRequest):
         )
 
 
+# ── Conversation Endpoints ───────────────────────────────────────────
+@app.get("/conversations")
+async def get_conversations():
+    """List all conversations with IDs and titles."""
+    return list_conversations()
+
+
+@app.get("/conversations/{conversation_id}/messages")
+async def get_conversation_messages(conversation_id: str):
+    """Get all messages for a specific conversation."""
+    messages = get_all_messages(conversation_id)
+    if not messages and conversation_id not in [c["id"] for c in list_conversations()]:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return {"conversation_id": conversation_id, "messages": messages}
+
+
+# ── Health Check ──────────────────────────────────────────────────────
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""

@@ -1,6 +1,9 @@
 """
 LLM Client — Thin wrapper around the Groq Python SDK.
 No LangChain, no abstractions — just pure API calls.
+
+Supports multi-turn conversation via the messages[] array:
+  system prompt → conversation history → current user message
 """
 
 from groq import Groq
@@ -28,11 +31,18 @@ def generate(
     model: str,
     system_prompt: str,
     user_message: str,
+    conversation_history: list[dict] | None = None,
     temperature: float = 0.3,
     max_tokens: int = 1024,
 ) -> dict:
     """
-    Call the Groq chat-completion API.
+    Call the Groq chat-completion API with multi-turn support.
+
+    Args:
+        model: Model ID to use
+        system_prompt: System prompt (includes RAG context)
+        user_message: Current user question
+        conversation_history: Previous turns as [{role, content}, ...]
 
     Returns:
     {
@@ -43,13 +53,18 @@ def generate(
     """
     client = _get_client()
 
+    # Build messages array: system → history → current user message
+    messages = [{"role": "system", "content": system_prompt}]
+
+    if conversation_history:
+        messages.extend(conversation_history)
+
+    messages.append({"role": "user", "content": user_message})
+
     try:
         response = client.chat.completions.create(
             model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message},
-            ],
+            messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
         )

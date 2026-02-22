@@ -10,6 +10,13 @@ const SUGGESTIONS = [
     'What is the SLA for support response times?',
 ]
 
+// Map evaluator flags to user-friendly warning labels
+const FLAG_LABELS = {
+    no_context: '⚠️ Low confidence — no supporting documents found. Please verify with support.',
+    refusal: '⚠️ This question may not be covered in our documentation.',
+    low_grounding: '⚠️ Low confidence — this response may not be fully accurate. Please verify with support.',
+}
+
 export default function App() {
     const [conversations, setConversations] = useState([])
     const [activeConvId, setActiveConvId] = useState(null)
@@ -20,6 +27,14 @@ export default function App() {
 
     const messagesEndRef = useRef(null)
     const textareaRef = useRef(null)
+
+    // Load conversations from backend on mount
+    useEffect(() => {
+        fetch(`${API_BASE}/conversations`)
+            .then(res => res.json())
+            .then(data => setConversations(data))
+            .catch(() => { })  // silently fail on first load
+    }, [])
 
     // Auto-scroll to bottom
     useEffect(() => {
@@ -46,6 +61,26 @@ export default function App() {
         setActiveConvId(null)
         setMessages([])
         setInput('')
+    }, [])
+
+    const loadConversation = useCallback(async (convId) => {
+        try {
+            const res = await fetch(`${API_BASE}/conversations/${convId}/messages`)
+            if (!res.ok) throw new Error('Failed to load conversation')
+            const data = await res.json()
+
+            setActiveConvId(convId)
+            // Transform backend messages to frontend format
+            const frontendMessages = data.messages.map(msg => ({
+                role: msg.role,
+                content: msg.content,
+                sources: msg.sources || undefined,
+                metadata: msg.metadata || undefined,
+            }))
+            setMessages(frontendMessages)
+        } catch (err) {
+            setError('Failed to load conversation')
+        }
     }, [])
 
     const sendMessage = useCallback(async (text) => {
@@ -76,13 +111,21 @@ export default function App() {
 
             const data = await res.json()
 
-            // Update conversation ID
+            // Update conversation ID and sidebar
             if (!activeConvId) {
                 setActiveConvId(data.conversation_id)
                 setConversations(prev => [
-                    { id: data.conversation_id, title: question.slice(0, 40) + (question.length > 40 ? '…' : '') },
+                    { id: data.conversation_id, title: question.slice(0, 40) + (question.length > 40 ? '…' : ''), message_count: 2 },
                     ...prev,
                 ])
+            } else {
+                // Update message count for existing conversation
+                setConversations(prev =>
+                    prev.map(c => c.id === data.conversation_id
+                        ? { ...c, message_count: (c.message_count || 0) + 2 }
+                        : c
+                    )
+                )
             }
 
             // Add assistant message
@@ -96,7 +139,6 @@ export default function App() {
 
         } catch (err) {
             setError(err.message || 'Something went wrong')
-            // Remove stuck user message and show error
             setMessages(prev => [
                 ...prev,
                 { role: 'assistant', content: `⚠️ Error: ${err.message}`, isError: true },
@@ -111,11 +153,6 @@ export default function App() {
             e.preventDefault()
             sendMessage()
         }
-    }
-
-    const selectConversation = (conv) => {
-        setActiveConvId(conv.id)
-        // In a real app, we'd load messages from the server here
     }
 
     return (
@@ -141,7 +178,7 @@ export default function App() {
                         <div
                             key={conv.id}
                             className={`conv-item ${conv.id === activeConvId ? 'active' : ''}`}
-                            onClick={() => selectConversation(conv)}
+                            onClick={() => loadConversation(conv.id)}
                         >
                             {conv.title}
                         </div>
@@ -239,6 +276,7 @@ function WelcomeScreen({ onSuggestion }) {
 function Message({ message }) {
     const [sourcesOpen, setSourcesOpen] = useState(false)
     const isUser = message.role === 'user'
+    const flags = message.metadata?.evaluator_flags || []
 
     return (
         <div className={`message ${isUser ? 'user' : 'assistant'}`}>
@@ -257,11 +295,22 @@ function Message({ message }) {
                 )}
             </div>
 
+            {/* Evaluator flag warning labels */}
+            {!isUser && flags.length > 0 && (
+                <div className="flag-warnings">
+                    {flags.map((flag, i) => (
+                        <div key={i} className="flag-warning">
+                            {FLAG_LABELS[flag] || `⚠️ Flag: ${flag} — please verify with support.`}
+                        </div>
+                    ))}
+                </div>
+            )}
+
             {/* Metadata tags */}
             {!isUser && message.metadata && (
                 <div className="metadata-bar">
                     <span className="meta-tag model">
-                        🤖 {message.metadata.model_used.split('/').pop()}
+                        {message.metadata.model_used.split('/').pop()}
                     </span>
                     <span className="meta-tag classification">
                         {message.metadata.classification === 'complex' ? '🧠' : '⚡'}{' '}
@@ -271,13 +320,8 @@ function Message({ message }) {
                         ⏱ {message.metadata.latency_ms}ms
                     </span>
                     <span className="meta-tag">
-                        📄 {message.metadata.chunks_retrieved} chunks
+                        {message.metadata.chunks_retrieved} chunks
                     </span>
-                    {message.metadata.evaluator_flags?.map((flag, i) => (
-                        <span key={i} className="meta-tag flag">
-                            ⚠ {flag}
-                        </span>
-                    ))}
                 </div>
             )}
 
@@ -288,7 +332,7 @@ function Message({ message }) {
                         className="sources-toggle"
                         onClick={() => setSourcesOpen(!sourcesOpen)}
                     >
-                        <span>📎 {message.sources.length} source{message.sources.length > 1 ? 's' : ''}</span>
+                        <span> {message.sources.length} source{message.sources.length > 1 ? 's' : ''}</span>
                         <span className={`arrow ${sourcesOpen ? 'open' : ''}`}>▼</span>
                     </button>
                     {sourcesOpen && (
@@ -296,7 +340,7 @@ function Message({ message }) {
                             {message.sources.map((src, i) => (
                                 <div key={i} className="source-item">
                                     <div className="source-info">
-                                        <span className="source-icon">📄</span>
+                                        <span className="source-icon"></span>
                                         <span className="source-name">{src.document}</span>
                                         <span className="source-page">p.{src.page}</span>
                                     </div>
