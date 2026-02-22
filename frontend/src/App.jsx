@@ -94,8 +94,74 @@ export default function App() {
         setMessages(prev => [...prev, userMsg])
         setLoading(true)
 
+        // Add empty assistant message that will be filled token-by-token
+        const streamingMsg = { role: 'assistant', content: '', streaming: true }
+        setMessages(prev => [...prev, streamingMsg])
+
+        // Token queue for typing effect
+        const tokenQueue = []
+        let doneEvent = null
+        let streamFinished = false
+        let draining = false
+
+        const TYPING_SPEED = 8 // ms per token — adjust for faster/slower
+
+        function drainQueue() {
+            if (draining) return
+            draining = true
+
+            const interval = setInterval(() => {
+                if (tokenQueue.length > 0) {
+                    const token = tokenQueue.shift()
+                    setMessages(prev => {
+                        const updated = [...prev]
+                        const last = updated[updated.length - 1]
+                        updated[updated.length - 1] = {
+                            ...last,
+                            content: last.content + token,
+                        }
+                        return updated
+                    })
+                } else if (streamFinished) {
+                    clearInterval(interval)
+
+                    // All tokens drained — now finalize with metadata
+                    if (doneEvent) {
+                        setMessages(prev => {
+                            const updated = [...prev]
+                            const last = updated[updated.length - 1]
+                            updated[updated.length - 1] = {
+                                ...last,
+                                streaming: false,
+                                metadata: doneEvent.metadata,
+                                sources: doneEvent.sources,
+                            }
+                            return updated
+                        })
+
+                        if (!activeConvId) {
+                            setActiveConvId(doneEvent.conversation_id)
+                            setConversations(prev => [
+                                { id: doneEvent.conversation_id, title: question.slice(0, 40) + (question.length > 40 ? '…' : ''), message_count: 2 },
+                                ...prev,
+                            ])
+                        } else {
+                            setConversations(prev =>
+                                prev.map(c => c.id === doneEvent.conversation_id
+                                    ? { ...c, message_count: (c.message_count || 0) + 2 }
+                                    : c
+                                )
+                            )
+                        }
+                    }
+
+                    setLoading(false)
+                }
+            }, TYPING_SPEED)
+        }
+
         try {
-            const res = await fetch(`${API_BASE}/query`, {
+            const res = await fetch(`${API_BASE}/query/stream`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -109,41 +175,59 @@ export default function App() {
                 throw new Error(errData.detail || `Server error (${res.status})`)
             }
 
-            const data = await res.json()
+            const reader = res.body.getReader()
+            const decoder = new TextDecoder()
+            let buffer = ''
 
-            // Update conversation ID and sidebar
-            if (!activeConvId) {
-                setActiveConvId(data.conversation_id)
-                setConversations(prev => [
-                    { id: data.conversation_id, title: question.slice(0, 40) + (question.length > 40 ? '…' : ''), message_count: 2 },
-                    ...prev,
-                ])
-            } else {
-                // Update message count for existing conversation
-                setConversations(prev =>
-                    prev.map(c => c.id === data.conversation_id
-                        ? { ...c, message_count: (c.message_count || 0) + 2 }
-                        : c
-                    )
-                )
+            while (true) {
+                const { done, value } = await reader.read()
+                if (done) break
+
+                buffer += decoder.decode(value, { stream: true })
+
+                const lines = buffer.split('\n')
+                buffer = lines.pop()
+
+                for (const line of lines) {
+                    if (!line.startsWith('data: ')) continue
+                    const jsonStr = line.slice(6)
+                    if (!jsonStr) continue
+
+                    try {
+                        const event = JSON.parse(jsonStr)
+
+                        if (event.type === 'token') {
+                            tokenQueue.push(event.content)
+                            if (!draining) drainQueue()
+                        } else if (event.type === 'done') {
+                            doneEvent = event
+                        } else if (event.type === 'error') {
+                            throw new Error(event.content)
+                        }
+                    } catch (parseErr) {
+                        // Skip malformed SSE lines
+                    }
+                }
             }
 
-            // Add assistant message
-            const assistantMsg = {
-                role: 'assistant',
-                content: data.answer,
-                sources: data.sources,
-                metadata: data.metadata,
-            }
-            setMessages(prev => [...prev, assistantMsg])
+            streamFinished = true
+            if (!draining) drainQueue()
 
         } catch (err) {
+            streamFinished = true
             setError(err.message || 'Something went wrong')
-            setMessages(prev => [
-                ...prev,
-                { role: 'assistant', content: `⚠️ Error: ${err.message}`, isError: true },
-            ])
-        } finally {
+            setMessages(prev => {
+                const updated = [...prev]
+                const last = updated[updated.length - 1]
+                if (last && last.streaming) {
+                    updated[updated.length - 1] = {
+                        role: 'assistant',
+                        content: `⚠️ Error: ${err.message}`,
+                        isError: true,
+                    }
+                }
+                return updated
+            })
             setLoading(false)
         }
     }, [input, loading, activeConvId])
@@ -220,7 +304,6 @@ export default function App() {
                             {messages.map((msg, i) => (
                                 <Message key={i} message={msg} />
                             ))}
-                            {loading && <LoadingIndicator />}
                             <div ref={messagesEndRef} />
                         </div>
                     )}
@@ -300,8 +383,13 @@ function Message({ message }) {
             <div className="message-body">
                 {isUser ? (
                     <p>{message.content}</p>
+                ) : message.streaming && !message.content ? (
+                    <span className="streaming-cursor">▊</span>
                 ) : (
-                    <ReactMarkdown>{message.content}</ReactMarkdown>
+                    <>
+                        <ReactMarkdown>{message.content}</ReactMarkdown>
+                        {message.streaming && <span className="streaming-cursor">▊</span>}
+                    </>
                 )}
             </div>
 
