@@ -28,13 +28,23 @@ export default function App() {
     const messagesEndRef = useRef(null)
     const textareaRef = useRef(null)
 
+    // Persistent Session ID for isolation (clears on tab close)
+    const [sessionId] = useState(() => {
+        let sid = sessionStorage.getItem('clearpath_session_id')
+        if (!sid) {
+            sid = 'sess_' + Math.random().toString(36).substring(2, 15)
+            sessionStorage.setItem('clearpath_session_id', sid)
+        }
+        return sid
+    })
+
     // Load conversations from backend on mount
     useEffect(() => {
-        fetch(`${API_BASE}/conversations`)
+        fetch(`${API_BASE}/conversations?session_id=${sessionId}`)
             .then(res => res.json())
             .then(data => setConversations(data))
             .catch(() => { })  // silently fail on first load
-    }, [])
+    }, [sessionId])
 
     // Auto-scroll to bottom
     useEffect(() => {
@@ -127,6 +137,11 @@ export default function App() {
 
                     // All tokens drained — now finalize with metadata
                     if (doneEvent) {
+                        // UI Presentation: Debug JSON Output
+                        console.log('--- Final JSON Response ---')
+                        console.log(JSON.stringify(doneEvent, null, 2))
+                        console.log('---------------------------')
+
                         setMessages(prev => {
                             const updated = [...prev]
                             const last = updated[updated.length - 1]
@@ -167,6 +182,7 @@ export default function App() {
                 body: JSON.stringify({
                     question,
                     conversation_id: activeConvId || undefined,
+                    session_id: sessionId,
                 }),
             })
 

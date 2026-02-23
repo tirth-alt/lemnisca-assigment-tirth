@@ -86,21 +86,11 @@ app.add_middleware(
 # ── Static File Serving (Monolith) ────────────────────────────────────
 STATIC_DIR = Path(__file__).parent.parent / "static"
 
+# Static assets mounting
 if STATIC_DIR.exists():
-    # Mount /assets for Vite's JS/CSS
     assets_dir = STATIC_DIR / "assets"
     if assets_dir.exists():
         app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
-    
-    # Catch-all route to serve index.html for SPA routing
-    @app.get("/{full_path:path}")
-    async def serve_spa(full_path: str):
-        index_path = STATIC_DIR / "index.html"
-        if index_path.exists():
-            return FileResponse(index_path)
-        raise HTTPException(status_code=404, detail="Frontend build not found")
-else:
-    logger.warning("Static directory not found at %s. Frontend will not be served.", STATIC_DIR)
 
 
 # ── Pydantic Models ──────────────────────────────────────────────────
@@ -108,6 +98,9 @@ class QueryRequest(BaseModel):
     question: str = Field(..., min_length=1, description="The user's query")
     conversation_id: Optional[str] = Field(
         None, description="Optional conversation ID for multi-turn"
+    )
+    session_id: Optional[str] = Field(
+        None, description="Optional session ID for isolation"
     )
 
 
@@ -148,7 +141,7 @@ async def query_endpoint(request: QueryRequest):
 
     try:
         # 0. Conversation ID
-        conv_id = get_or_create_id(request.conversation_id)
+        conv_id = get_or_create_id(request.conversation_id, session_id=request.session_id)
 
         # 1. Retrieve relevant chunks
         if faiss_index is None or not chunks_store:
@@ -220,11 +213,12 @@ async def query_endpoint(request: QueryRequest):
         }
 
         # 9. Update conversation memory (store with sources/metadata)
-        add_message(conv_id, "user", request.question)
+        add_message(conv_id, "user", request.question, session_id=request.session_id)
         add_message(
             conv_id, "assistant", llm_result["answer"],
             sources=sources_dicts,
             metadata=metadata_dict,
+            session_id=request.session_id,
         )
 
         return QueryResponse(
@@ -259,7 +253,7 @@ async def query_stream_endpoint(request: QueryRequest):
     start_time = time.time()
 
     # Pre-stream work: retrieval, routing, prompt building
-    conv_id = get_or_create_id(request.conversation_id)
+    conv_id = get_or_create_id(request.conversation_id, session_id=request.session_id)
 
     if faiss_index is None or not chunks_store:
         retrieved = []
@@ -331,11 +325,12 @@ async def query_stream_endpoint(request: QueryRequest):
         }
 
         # Save to conversation memory
-        add_message(conv_id, "user", request.question)
+        add_message(conv_id, "user", request.question, session_id=request.session_id)
         add_message(
             conv_id, "assistant", answer_text,
             sources=sources_dicts,
             metadata=metadata_dict,
+            session_id=request.session_id,
         )
 
         # Final structured event
@@ -356,11 +351,10 @@ async def query_stream_endpoint(request: QueryRequest):
         },
     )
 
-# ── Conversation Endpoints ───────────────────────────────────────────
 @app.get("/conversations")
-async def get_conversations():
-    """List all conversations with IDs and titles."""
-    return list_conversations()
+async def get_conversations(session_id: Optional[str] = None):
+    """List conversations, optionally filtered by session_id."""
+    return list_conversations(session_id)
 
 
 @app.get("/conversations/{conversation_id}/messages")
@@ -381,3 +375,14 @@ async def health_check():
         "index_loaded": faiss_index is not None,
         "chunks_count": len(chunks_store),
     }
+
+# ── Catch-all SPA Routing ───────────────────────────────────────────
+if STATIC_DIR.exists():
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        index_path = STATIC_DIR / "index.html"
+        if index_path.exists():
+            return FileResponse(index_path)
+        raise HTTPException(status_code=404, detail="Frontend build not found")
+else:
+    logger.warning("Static directory not found. Frontend will not be served.")

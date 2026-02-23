@@ -11,6 +11,7 @@ DOCS_DIR = PROJECT_ROOT / "clearpath_docs"
 INDEX_DIR = BASE_DIR / "data"
 FAISS_INDEX_PATH = INDEX_DIR / "faiss_index.bin"
 CHUNKS_PATH = INDEX_DIR / "chunks.json"
+CONVERSATIONS_PATH = INDEX_DIR / "conversations.json"
 
 # ── Groq ───────────────────────────────────────────────────────────────
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
